@@ -1,0 +1,9 @@
+[package]
+name = "combiner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cpal = "0.15.3"
+crossbeam-channel = "0.5.13"
+fundsp = "0.18.2"
