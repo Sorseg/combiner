@@ -1,10 +1,14 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     StreamConfig,
 };
 use crossbeam_channel::Receiver;
+use eframe::egui;
 use fundsp::hacker::*;
 
 #[derive(Clone)]
@@ -22,7 +26,22 @@ impl InputNode {
     }
 }
 
-pub struct PitchShift {}
+// #[derive(Clone)]
+// pub struct PitchShift {
+//     resampler: Arc<SincFixedOut<f64>>
+// }
+
+// impl AudioNode for PitchShift {
+//     const ID: u64 = 1239;
+
+//     type Inputs = U1;
+
+//     type Outputs = U1;
+
+//     fn tick(&mut self, input: &Frame<f32, Self::Inputs>) -> Frame<f32, Self::Outputs> {
+//         todo!()
+//     }
+// }
 
 impl AudioNode for InputNode {
     const ID: u64 = 87;
@@ -40,39 +59,119 @@ impl AudioNode for InputNode {
     }
 }
 
-#[allow(clippy::precedence)]
-fn main() {
-    let report_dur = Duration::from_secs(4);
-    let host = cpal::default_host();
-    let (sound_sender, sound_receiver) = crossbeam_channel::bounded(4096 * 2);
-    let _rec_stream = {
-        let device = host.default_input_device().unwrap();
+enum AppState {
+    Init,
+    Selecting {
+        record: Vec<cpal::Device>,
+        playback: Vec<cpal::Device>,
+        selected_rec: Option<usize>,
+        selected_pb: Option<usize>,
+    },
+    Working(cpal::Stream, cpal::Stream),
+}
 
-        let config: StreamConfig = device
+struct App {
+    state: AppState,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            state: AppState::Init,
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| match &mut self.state {
+            AppState::Init => {
+                ui.label("loading");
+                let host = cpal::default_host();
+                self.state = AppState::Selecting {
+                    record: host.input_devices().unwrap().collect(),
+                    playback: host.output_devices().unwrap().collect(),
+                    selected_rec: None,
+                    selected_pb: None,
+                }
+            }
+            AppState::Selecting {
+                record,
+                playback,
+                selected_rec,
+                selected_pb,
+            } => {
+                let size = ui.available_size();
+                ui.horizontal(|ui| {
+                    ui.set_max_height(size.x);
+
+                    ui.vertical(|ui| {
+                        ui.label("Recording");
+                        egui::ScrollArea::vertical()
+                            .id_source("rec")
+                            .show(ui, |ui| {
+                                for (i, d) in record.iter().enumerate() {
+                                    if ui
+                                        .selectable_label(
+                                            Some(i) == *selected_rec,
+                                            d.name().unwrap_or("Unknown".to_string()),
+                                        )
+                                        .clicked()
+                                    {
+                                        *selected_rec = Some(i);
+                                    }
+                                }
+                            });
+                    });
+                    ui.vertical(|ui| {
+                        ui.label("Playback");
+                        egui::ScrollArea::vertical().id_source("pb").show(ui, |ui| {
+                            for (i, d) in playback.iter().enumerate() {
+                                if ui
+                                    .selectable_label(
+                                        Some(i) == *selected_pb,
+                                        d.name().unwrap_or("Unknown".to_string()),
+                                    )
+                                    .clicked()
+                                {
+                                    *selected_pb = Some(i);
+                                }
+                            }
+                        });
+                    });
+                });
+                if let (Some(sel_rec), Some(sel_pb)) = (selected_rec, selected_pb) {
+                    let (s1, s2) = start_streams(&record[*sel_rec], &playback[*sel_pb]);
+                    self.state = AppState::Working(s1, s2);
+                }
+            }
+            AppState::Working(_s1, _s2) => {
+                if ui.button("Reset").clicked() {
+                    self.state = AppState::Init;
+                }
+            }
+        });
+    }
+}
+
+fn start_streams(
+    rec_device: &cpal::Device,
+    pb_device: &cpal::Device,
+) -> (cpal::Stream, cpal::Stream) {
+    let (sound_sender, sound_receiver) = crossbeam_channel::bounded(4096 * 2);
+    let rec_stream = {
+        let config: StreamConfig = rec_device
             .default_input_config()
             .expect("Failed to get default input config")
             .into();
         let channels = config.channels;
 
-        println!("Record config on {} {config:?}", device.name().unwrap());
-        let mut read_count = 0;
-        let mut start = Instant::now();
-
-        let stream = device
+        let stream = rec_device
             .build_input_stream(
                 &config,
                 move |data: &[f32], _| {
                     // take only values from the first channel
                     for v in data.chunks(channels as usize) {
-                        read_count += 1;
-                        if start.elapsed() > report_dur {
-                            println!(
-                                "Recorded {} samples",
-                                read_count as f32 / report_dur.as_secs_f32()
-                            );
-                            start = Instant::now();
-                            read_count = 0;
-                        }
                         _ = sound_sender.try_send(v[0] + v[1]);
                     }
                 },
@@ -86,18 +185,16 @@ fn main() {
         stream.play().unwrap();
         stream
     };
-    let _playback_stream = {
-        let playback_device = host.default_output_device().unwrap();
-        let config: StreamConfig = playback_device.default_output_config().unwrap().into();
+    let playback_stream = {
+        let config: StreamConfig = pb_device.default_output_config().unwrap().into();
         let channels = config.channels as usize;
         println!(
             "Playback config on {} {config:?}",
-            playback_device.name().unwrap()
+            pb_device.name().unwrap()
         );
 
         let mut graph = {
             let input = {
-                
                 // let wav = hound::WavReader::open("comb.wav")
                 //     .unwrap()
                 //     .samples()
@@ -107,24 +204,24 @@ fn main() {
                 // wavech(&std::sync::Arc::new(Wave::from_samples(44100.0, &wav)), 0, None)
                 An(InputNode::new(sound_receiver))
             };
-
-            let pitch_shift = resynth(1024 * 2, |fft: &mut FftWindow| {
-                for i in 1..(fft.bins() - 4) {
-                    fft.set(0, i, fft.at(0, i + 3));
+            let shift_bins = 3;
+            let pitch_shift = resynth(1024 * 2, move |fft: &mut FftWindow| {
+                for i in 1..(fft.bins() - shift_bins - 1) {
+                    fft.set(0, i, fft.at(0, i + shift_bins));
                 }
             });
 
-            let knee = 0.1;
-            let pow = 0.84;
-            let shaper = shape_fn(move |v| {
-                if v.abs() < knee {
-                    v
-                } else {
-                    v.abs().powf(pow) * v.signum() / knee.powf(pow) * knee
-                }
-            });
+            // let knee = 0.1;
+            // let pow = 0.84;
+            // let shaper = shape_fn(move |v| {
+            //     if v.abs() < knee {
+            //         v
+            //     } else {
+            //         v.abs().powf(pow) * v.signum() / knee.powf(pow) * knee
+            //     }
+            // });
 
-            let compress = shaper >> mul(5.0) >> limiter(0.002, 0.002);
+            let compress = mul(5.0) >> limiter(0.002, 0.002);
             let q = 2.0;
             let initial_filtering =
                 pitch_shift >> highpass_hz(400.0, q) >> lowpass_hz(3000.0, q) >> compress.clone();
@@ -135,33 +232,21 @@ fn main() {
 
             let higher = highpass_hz(1000.0, q) >> compress.clone();
 
-            let graph = input >> initial_filtering >> split::<U2>() >> (lower | higher) >> join();
+            let graph = input >> initial_filtering ;// >> split::<U2>() >> (lower | higher) >> join();
 
             let mut graph = BlockRateAdapter::new(Box::new(graph));
             graph.set_sample_rate(config.sample_rate.0 as f64);
             graph
         };
 
-        let mut read_samples = 0;
-        let mut started = Instant::now();
-
-        let stream = playback_device
+        let stream = pb_device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
                     for i in 0..data.len() / channels {
-                        read_samples += 1;
                         let sample = graph.get_mono();
                         for c in 0..channels {
                             data[i * channels + c] = sample;
-                        }
-                        if started.elapsed() > report_dur {
-                            println!(
-                                "Read {} samples from the graph",
-                                read_samples as f32 / report_dur.as_secs_f32()
-                            );
-                            read_samples = 0;
-                            started = Instant::now();
                         }
                     }
                 },
@@ -174,7 +259,21 @@ fn main() {
         stream.play().unwrap();
         stream
     };
-    loop {
-        std::thread::sleep(Duration::from_secs(1))
-    }
+    (playback_stream, rec_stream)
+}
+
+#[allow(clippy::precedence)]
+fn main() {
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([800.0, 300.0])
+            .with_min_inner_size([600.0, 300.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Combiner",
+        native_options,
+        Box::new(|_cc| Ok(Box::new(App::default()))),
+    )
+    .unwrap();
 }

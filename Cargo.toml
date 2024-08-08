@@ -6,5 +6,6 @@ edition = "2021"
 [dependencies]
 cpal = "0.15.3"
 crossbeam-channel = "0.5.13"
+eframe = "0.28.1"
 fundsp = "0.18.2"
 hound = "3.5.1"
