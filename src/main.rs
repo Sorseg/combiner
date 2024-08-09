@@ -164,15 +164,20 @@ fn start_streams(
             .default_input_config()
             .expect("Failed to get default input config")
             .into();
+        println!("Record config on {} {config:?}", rec_device.name().unwrap());
+
         let channels = config.channels;
 
         let stream = rec_device
             .build_input_stream(
                 &config,
                 move |data: &[f32], _| {
-                    // take only values from the first channel
+                    if data.len() <= 2 {
+                        return;
+                    }
+                    // average values together
                     for v in data.chunks(channels as usize) {
-                        _ = sound_sender.try_send(v[0] + v[1]);
+                        _ = sound_sender.try_send(v.iter().sum());
                     }
                 },
                 move |err| {
@@ -192,6 +197,8 @@ fn start_streams(
             "Playback config on {} {config:?}",
             pb_device.name().unwrap()
         );
+
+        // FIXME: resample
 
         let mut graph = {
             let input = {
@@ -232,7 +239,7 @@ fn start_streams(
 
             let higher = highpass_hz(1000.0, q) >> compress.clone();
 
-            let graph = input >> initial_filtering ;// >> split::<U2>() >> (lower | higher) >> join();
+            let graph = input >> initial_filtering >> split::<U2>() >> (lower | higher) >> join();
 
             let mut graph = BlockRateAdapter::new(Box::new(graph));
             graph.set_sample_rate(config.sample_rate.0 as f64);
