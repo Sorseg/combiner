@@ -1,8 +1,6 @@
 use std::{
     collections::VecDeque,
     f32::consts::TAU,
-    io::Write,
-    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -29,63 +27,6 @@ impl InputNode {
         }
     }
 }
-
-#[derive(Clone)]
-pub struct PitchShift {
-    resampler: Arc<Mutex<FftFixedOut<f32>>>,
-    input: Vec<f32>,
-    resample_output: Vec<f32>,
-    output: VecDeque<f32>,
-    shift_ratio: f32,
-    current_frame_progress: f32,
-}
-impl PitchShift {
-    fn new(shift_ratio: f32) -> Self {
-        Self {
-            resampler: Arc::new(Mutex::new(
-                FftFixedOut::new((44100.0 * shift_ratio) as usize, 44100, 256, 1, 1).unwrap(),
-            )),
-            input: Vec::with_capacity(1024),
-            resample_output: vec![0.0; 1024],
-            output: VecDeque::with_capacity(1024),
-            shift_ratio,
-            current_frame_progress: 0.0,
-        }
-    }
-}
-
-// impl AudioNode for PitchShift {
-//     const ID: u64 = 1239;
-
-//     type Inputs = U1;
-
-//     type Outputs = U1;
-
-//     fn tick(&mut self, input: &Frame<f32, Self::Inputs>) -> Frame<f32, Self::Outputs> {
-//         let mut resampler = self.resampler.lock().unwrap();
-//         self.input.push(input[0]);
-//         self.current_frame_progress += 1.0 / self.shift_ratio;
-//         for _ in 0..(self.current_frame_progress.floor() as u32) {
-//             self.output.pop_front();
-//         }
-//         self.current_frame_progress = self.current_frame_progress.fract();
-
-//         if let Some(v) = self.output.front().copied() {
-//             return [v].into();
-//         }
-//         if self.input.len() >= resampler.input_frames_next() {
-//             let (read, written) = resampler
-//                 .process_into_buffer(&[&self.input], &mut [&mut self.resample_output], None)
-//                 .unwrap();
-//             self.output.extend(&self.resample_output[0..written]);
-//             // remove the processed chunk
-//             self.input.rotate_left(read);
-//             self.input.truncate(self.input.len() - read);
-//         }
-
-//         [self.output.front().copied().unwrap_or(0.0)].into()
-//     }
-// }
 
 impl AudioNode for InputNode {
     const ID: u64 = 87;
@@ -310,8 +251,11 @@ fn start_streams(
 
             let compress = mul(5.0) >> limiter(0.002, 0.002);
             let q = 2.0;
-            let initial_filtering =
-                pitch_shift >> highpass_hz(400.0, q) >> highpass_hz(400.0, q) >> lowpass_hz(3000.0, q) >> compress.clone();
+            let initial_filtering = pitch_shift
+                >> highpass_hz(400.0, q)
+                >> highpass_hz(400.0, q)
+                >> lowpass_hz(3000.0, q)
+                >> compress.clone();
 
             let lower = phaser(0.4, |t| fundsp::hacker::sin_hz(3.0, t) * 0.3 + 0.3)
                 >> lowpass_hz(700.0, q)
