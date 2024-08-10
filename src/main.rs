@@ -205,14 +205,13 @@ fn start_streams(
                 An(InputNode::new(sound_receiver))
             };
 
-            let shift_bins = 7.5_f32;
-            const FRAME_SIZE: usize = 512 * 4;
+            let pitch_shift = 0.8_f32;
+            const FRAME_SIZE: usize = 512 * 2;
             let mut input_phases = [0.0; FRAME_SIZE];
             let mut incoming_frequencies = [0.0; FRAME_SIZE];
             let mut outgoing_phases = [0.0; FRAME_SIZE];
             let bin_width = rec_sample_rate as f32 / FRAME_SIZE as f32;
 
-            let mut start = Instant::now();
             // copy-pasted from the resynth
             const WINDOWS: usize = 4;
             let dt = FRAME_SIZE as f32 / pb_sample_rate as f32 / WINDOWS as f32;
@@ -221,7 +220,7 @@ fn start_streams(
                 for i in 0..(fft.bins() - 1) {
                     let freq = fft.frequency(i);
                     // phase [-pi, pi]
-                    let (_amplitude, phase) = fft.at(0, i).to_polar();
+                    let (amplitude, phase) = fft.at(0, i).to_polar();
                     // [0, tau)
                     let phase_delta = (phase - input_phases[i] + TAU) % TAU;
                     // [0, tau)
@@ -232,43 +231,34 @@ fn start_streams(
                     // I don't understand this
                     let freq_deviation = phase_error / TAU / dt;
                     let bin_deviation = freq_deviation / bin_width;
-                    // assert!((-0.5..=0.5).contains(&bin_deviation), "{bin_deviation}");
 
                     incoming_frequencies[i] = i as f32 + bin_deviation;
-                    if i == 10 && start.elapsed().as_millis() > 100 {
-                        start = Instant::now();
-                        println!(
-                            "t {:>10.4} df {:>10.4}   f {:>10.4}   p {:>10.3}   dp {:>10.3}   edp {:>10.3}   pe {:>10.3}   f_dev {:>10.3}   true f {:>10.3}",
-                            dt,
-                            bin_width,
-                            fft.frequency(i),
-                            phase,
-                            phase_delta,
-                            expected_phase_d,
-                            phase_error,
-                            freq_deviation,
-                            incoming_frequencies[i] * bin_width
-                        );
-                    }
-                    input_phases[i] = phase;
-                }
 
-                // for i in 0..fft.bins() - 1 {
-                //     fft.set(
-                //         0,
-                //         i,
-                //         (Complex32::i() * incoming_phases[i].sin() + incoming_phases[i].cos()) * smeared[i],
-                //     );
-                // }
+                    input_phases[i] = phase;
+
+                    // calc output
+                    let newbin = (i as f32 * pitch_shift).round() as usize;
+
+                    if newbin > 0 && newbin < fft.bins() {
+                        let bin_deviation = incoming_frequencies[i] * pitch_shift - newbin as f32;
+                        let freq = bin_deviation * bin_width + fft.frequency(newbin);
+                        let phase_diff = freq * dt * TAU;
+                        let out_phase = (outgoing_phases[newbin] + phase_diff) % TAU;
+
+                        fft.set(0, newbin, Complex32::from_polar(amplitude, out_phase));
+                        outgoing_phases[newbin] = out_phase;
+                    }
+                }
             });
 
             let compress = mul(5.0) >> limiter(0.002, 0.002);
-            let q = 2.0;
-            // let initial_filtering = pitch_shift
-            //     >> highpass_hz(400.0, q)
-            //     >> highpass_hz(400.0, q)
-            //     >> lowpass_hz(3000.0, q)
-            //     >> compress.clone();
+            let q = 1.0;
+            let initial_filtering = pitch_shift
+                >> highpass_hz(400.0, q)
+                >> highpass_hz(400.0, q)
+                >> lowpass_hz(3000.0, q)
+                >> lowpass_hz(3000.0, q)
+                >> compress.clone();
 
             let lower = phaser(0.4, |t| fundsp::hacker::sin_hz(3.0, t) * 0.3 + 0.3)
                 >> lowpass_hz(700.0, q)
@@ -276,8 +266,8 @@ fn start_streams(
 
             let higher = highpass_hz(1000.0, q) >> compress.clone();
 
-            // let graph = input >> initial_filtering >> split::<U2>() >> (lower | higher) >> join();
-            let graph = input >> pitch_shift;
+            let graph = input >> initial_filtering >> split::<U2>() >> (lower | higher) >> join() >> compress.clone();
+            // let graph = input >> pitch_shift;
 
             let mut graph = BlockRateAdapter::new(Box::new(graph));
             graph.set_sample_rate(config.sample_rate.0 as f64);
