@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    f32::consts::TAU,
+    f32::consts::{PI, TAU},
     time::{Duration, Instant},
 };
 
@@ -205,57 +205,70 @@ fn start_streams(
                 An(InputNode::new(sound_receiver))
             };
 
-            let shift_bins = 5.0_f32;
-            const FRAME_SIZE: usize = 1024 * 2;
-            let mut phases = [0.0; FRAME_SIZE];
-            let mut smeared = [0.0; FRAME_SIZE];
+            let shift_bins = 7.5_f32;
+            const FRAME_SIZE: usize = 512 * 4;
+            let mut input_phases = [0.0; FRAME_SIZE];
+            let mut incoming_frequencies = [0.0; FRAME_SIZE];
+            let mut outgoing_phases = [0.0; FRAME_SIZE];
+            let bin_width = rec_sample_rate as f32 / FRAME_SIZE as f32;
+
+            let mut start = Instant::now();
+            // copy-pasted from the resynth
+            const WINDOWS: usize = 4;
+            let dt = FRAME_SIZE as f32 / pb_sample_rate as f32 / WINDOWS as f32;
 
             let pitch_shift = resynth::<U1, U1, _>(FRAME_SIZE, move |fft: &mut FftWindow| {
-                let first_bin = std::cmp::max(0, (-shift_bins).ceil() as usize);
-                let last_bin = std::cmp::min(
-                    fft.bins() - 1,
-                    (fft.bins() as isize - 1 - shift_bins.ceil() as isize) as usize,
-                );
+                for i in 0..(fft.bins() - 1) {
+                    let freq = fft.frequency(i);
+                    // phase [-pi, pi]
+                    let (_amplitude, phase) = fft.at(0, i).to_polar();
+                    // [0, tau)
+                    let phase_delta = (phase - input_phases[i] + TAU) % TAU;
+                    // [0, tau)
+                    let expected_phase_d = freq * dt * TAU % TAU;
+                    // [-pi, pi)
+                    let phase_error = (phase_delta - expected_phase_d) % PI;
 
-                smeared.iter_mut().for_each(|v| *v = 0.0);
+                    // I don't understand this
+                    let freq_deviation = phase_error / TAU / dt;
+                    let bin_deviation = freq_deviation / bin_width;
+                    // assert!((-0.5..=0.5).contains(&bin_deviation), "{bin_deviation}");
 
-                #[allow(clippy::needless_range_loop)]
-                for i in first_bin..last_bin {
-                    phases[i] += FRAME_SIZE as f32 / pb_sample_rate as f32 * fft.frequency(i);
-                    phases[i] %= TAU;
-
-                    let source_value_floor = fft.at(
-                        0,
-                        i.checked_add_signed(shift_bins.floor() as isize).unwrap(),
-                    );
-                    let source_value_ceil =
-                        fft.at(0, i.checked_add_signed(shift_bins.ceil() as isize).unwrap());
-
-                    let pow = source_value_floor.norm_sqr() * (1.0 - shift_bins.fract())
-                        + source_value_ceil.norm_sqr() * shift_bins.fract();
-
-                    smeared[i.saturating_sub(2)] += pow * 0.1;
-                    smeared[i.saturating_sub(1)] += pow * 0.5;
-                    smeared[i] += pow;
-                    smeared[std::cmp::min(i + 1, fft.bins() - 1)] += pow * 0.5;
-                    smeared[std::cmp::min(i + 2, fft.bins() - 1)] += pow * 0.1;
+                    incoming_frequencies[i] = i as f32 + bin_deviation;
+                    if i == 10 && start.elapsed().as_millis() > 100 {
+                        start = Instant::now();
+                        println!(
+                            "t {:>10.4} df {:>10.4}   f {:>10.4}   p {:>10.3}   dp {:>10.3}   edp {:>10.3}   pe {:>10.3}   f_dev {:>10.3}   true f {:>10.3}",
+                            dt,
+                            bin_width,
+                            fft.frequency(i),
+                            phase,
+                            phase_delta,
+                            expected_phase_d,
+                            phase_error,
+                            freq_deviation,
+                            incoming_frequencies[i] * bin_width
+                        );
+                    }
+                    input_phases[i] = phase;
                 }
-                for i in 0..fft.bins() - 1 {
-                    fft.set(
-                        0,
-                        i,
-                        (Complex32::i() * phases[i].sin() + phases[i].cos()) * smeared[i],
-                    );
-                }
+
+                // for i in 0..fft.bins() - 1 {
+                //     fft.set(
+                //         0,
+                //         i,
+                //         (Complex32::i() * incoming_phases[i].sin() + incoming_phases[i].cos()) * smeared[i],
+                //     );
+                // }
             });
 
             let compress = mul(5.0) >> limiter(0.002, 0.002);
             let q = 2.0;
-            let initial_filtering = pitch_shift
-                >> highpass_hz(400.0, q)
-                >> highpass_hz(400.0, q)
-                >> lowpass_hz(3000.0, q)
-                >> compress.clone();
+            // let initial_filtering = pitch_shift
+            //     >> highpass_hz(400.0, q)
+            //     >> highpass_hz(400.0, q)
+            //     >> lowpass_hz(3000.0, q)
+            //     >> compress.clone();
 
             let lower = phaser(0.4, |t| fundsp::hacker::sin_hz(3.0, t) * 0.3 + 0.3)
                 >> lowpass_hz(700.0, q)
@@ -263,8 +276,8 @@ fn start_streams(
 
             let higher = highpass_hz(1000.0, q) >> compress.clone();
 
-            let graph = input >> initial_filtering >> split::<U2>() >> (lower | higher) >> join();
-            // let graph = input >> pitch_shift;
+            // let graph = input >> initial_filtering >> split::<U2>() >> (lower | higher) >> join();
+            let graph = input >> pitch_shift;
 
             let mut graph = BlockRateAdapter::new(Box::new(graph));
             graph.set_sample_rate(config.sample_rate.0 as f64);
