@@ -251,8 +251,8 @@ fn start_streams(
                 }
             });
 
-            let compress = mul(5.0) >> limiter(0.002, 0.002);
-            let q = 1.0;
+            let compress = mul(3.0) >> limiter(0.002, 0.002);
+            let q = 3.0;
             let initial_filtering = pitch_shift
                 >> highpass_hz(400.0, q)
                 >> highpass_hz(400.0, q)
@@ -266,7 +266,7 @@ fn start_streams(
 
             let higher = highpass_hz(1000.0, q) >> compress.clone();
 
-            let graph = input >> initial_filtering >> split::<U2>() >> (lower | higher) >> join() >> compress.clone();
+            let graph = input >> initial_filtering >> split::<U2>() >> (lower | higher) >> join();
             // let graph = input >> pitch_shift;
 
             let mut graph = BlockRateAdapter::new(Box::new(graph));
