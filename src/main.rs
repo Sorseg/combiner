@@ -228,7 +228,7 @@ fn start_streams(
                     // [-pi, pi)
                     let phase_error = (phase_delta - expected_phase_d) % PI;
 
-                    // I don't understand this
+                    // phase offset to frequency
                     let freq_deviation = phase_error / TAU / dt;
                     let bin_deviation = freq_deviation / bin_width;
 
